@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Optional, Tuple
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 import requests
 
@@ -49,7 +49,7 @@ def resolve_ntfy_endpoint(ntfy_url: Optional[str]) -> Tuple[Optional[str], Optio
 
 
 class NtfySender:
-    """Send Markdown text notifications through the ntfy JSON publish API."""
+    """Send Markdown text or upload long reports as ntfy attachments."""
 
     def __init__(self, config: Config):
         self._ntfy_url = getattr(config, "ntfy_url", None)
@@ -69,7 +69,7 @@ class NtfySender:
         *,
         timeout_seconds: Optional[float] = None,
     ) -> bool:
-        """Publish a notification to ntfy using a JSON body with UTF-8 text."""
+        """Publish UTF-8 text, uploading reports over 4096 bytes as Markdown files."""
         if not self._is_ntfy_configured():
             logger.warning("ntfy URL 未配置，跳过推送")
             return False
@@ -99,10 +99,24 @@ class NtfySender:
             "markdown": True,
         }
 
+        publish_url = server_url
+        request_kwargs = {"json": payload}
+        encoded_content = sanitized_content.encode("utf-8")
+        # requests uses JSON escaping, which can double the wire size of CJK text.
+        json_size = len(requests.Request("POST", server_url, json=payload).prepare().body)
+        if len(encoded_content) > 4096 or json_size > 8192:
+            publish_url = f"{server_url}/{quote(topic, safe='')}"
+            headers["Content-Type"] = "text/markdown; charset=utf-8"
+            headers["Filename"] = f"report_{datetime.now():%Y%m%d_%H%M%S}.md"
+            request_kwargs = {
+                "data": encoded_content,
+                "params": {"title": title, "message": "Full report attached."},
+            }
+
         try:
             response = requests.post(
-                server_url,
-                json=payload,
+                publish_url,
+                **request_kwargs,
                 headers=headers,
                 timeout=timeout_seconds or 10,
                 verify=self._webhook_verify_ssl,

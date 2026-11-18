@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from enum import Enum
 
 from src.config import Config, get_config
+from src.services.us_technical import format_us_levels
 from src.enums import ReportType
 from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
 from src.notification_routing import (
@@ -445,7 +446,9 @@ class NotificationService(
         """Generate the aggregate report content used by merge/save/push paths."""
         normalized_type = self._normalize_report_type(report_type)
         if normalized_type == ReportType.BRIEF:
-            return self.generate_brief_report(results, report_date=report_date)
+            report = self.generate_brief_report(results, report_date=report_date)
+            details = format_us_levels(results, full=not self._report_summary_only)
+            return f"{report}\n\n{details}" if details else report
         return self.generate_dashboard_report(results, report_date=report_date)
 
     def _collect_models_used(self, results: List[AnalysisResult]) -> List[str]:
@@ -1255,7 +1258,20 @@ class NotificationService(
     def generate_dashboard_report(
         self,
         results: List[AnalysisResult],
-        report_date: Optional[str] = None
+        report_date: Optional[str] = None,
+        *,
+        summary_only: Optional[bool] = None,
+    ) -> str:
+        summary = self._report_summary_only if summary_only is None else summary_only
+        report = self._render_dashboard_report(results, report_date, summary_only=summary)
+        details = format_us_levels(results, full=not summary)
+        return f"{report}\n\n{details}" if details else report
+
+    def _render_dashboard_report(
+        self,
+        results: List[AnalysisResult],
+        report_date: Optional[str] = None,
+        *, summary_only: bool,
     ) -> str:
         """
         生成决策仪表盘格式的日报（详细版）
@@ -1292,7 +1308,7 @@ class NotificationService(
                 platform='markdown',
                 results=results,
                 report_date=report_date,
-                summary_only=self._report_summary_only,
+                summary_only=summary_only,
                 extra_context={
                     **self._get_history_compare_context(results),
                     "report_language": report_language,
@@ -1332,7 +1348,7 @@ class NotificationService(
                     f"{labels['score_label']} {r.sentiment_score} | "
                     f"{localize_trend_prediction(r.trend_prediction, report_language)}"
                 )
-                if self._report_summary_only:
+                if summary_only:
                     news_disclosure = self._empty_news_disclosure(r, report_language)
                     if news_disclosure:
                         report_lines.append(news_disclosure)
@@ -1344,7 +1360,7 @@ class NotificationService(
             ])
 
         # 逐个股票的决策仪表盘（Issue #262: summary_only 时跳过详情）
-        if not self._report_summary_only:
+        if not summary_only:
             for result in sorted_results:
                 signal_text, signal_emoji, signal_tag = self._get_signal_level(result)
                 dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}

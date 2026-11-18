@@ -236,6 +236,22 @@ def get_market_now(
     return current_time.astimezone(tz)
 
 
+def get_latest_completed_us_session(current_time: Optional[datetime] = None) -> Optional[date]:
+    """Resolve the US session without assuming today's bar is complete on errors."""
+    if not _XCALS_AVAILABLE:
+        return None
+    now = get_market_now("us", current_time=current_time)
+    try:
+        calendar = xcals.get_calendar(MARKET_EXCHANGE["us"])
+        session = calendar.date_to_session(now.date(), direction="previous")
+        if now < calendar.session_close(session):
+            session = calendar.previous_session(session)
+        return session.date()
+    except Exception:
+        logger.warning("Unable to resolve the latest completed US session", exc_info=True)
+        return None
+
+
 def get_effective_trading_date(
     market: Optional[str], current_time: Optional[datetime] = None
 ) -> date:

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 美股技术分析与模型上下文共用已完成常规日线，缺样本时 MA60 标为不可用。
+- [改进] 美股报告输出程序计算的 Wilder ATR14、摆动区域和条件止损，并分开显示长桥报价、成交密集价档和统计日期。移动均线、价区和止损的发布字段以程序结果为准。
+- [修复] 本地保存完整报告，通知摘要保留美股关键价位和条件。ntfy 同时检查消息和序列化请求大小。
+
+- [修复] ntfy 对超过 4,096 个 UTF-8 字节的通知（包括大盘复盘）自动上传完整 Markdown 附件，避免正文超限；保留短消息、鉴权及代理路径行为。
 
 - [修复] 每日 Actions 未设置实时行情顺序时保留空值，使仅配置 TickPlus Key 的任务正确启用自动首选及批量实时预取；保留显式顺序和无 Key 免费源回退。
 

@@ -118,7 +118,7 @@ daily_stock_analysis/
 | `SINGLE_STOCK_NOTIFY` | 单股推送模式：设为 `true` 则每分析完一只股票立即推送 | 可选 |
 | `REPORT_TYPE` | 报告类型：`simple`(精简)、`full`(完整)、`brief`(3-5句概括)，Docker环境推荐设为 `full` | 可选 |
 | `REPORT_LANGUAGE` | 报告与 Agent Chat 的默认输出语言：`zh`(默认中文) / `en`(英文) / `ko`(韩文)；会同步影响 Prompt、模板、通知 fallback、Web 报告页固定文案，以及未显式传入 `context.report_language` 的问股回复。`ko` 复用英文结构骨架并通过输出语言指令约束模型用韩文输出，通知按报告语言渲染本地化标签。仓库自带 `00-daily-analysis.yml` 已显式映射该变量，直接在 Actions Secrets/Variables 中配置即可生效 | 可选 |
-| `REPORT_SUMMARY_ONLY` | 仅分析结果摘要：设为 `true` 时只推送汇总，不含个股详情；多股时适合快速浏览（默认 false，Issue #262） | 可选 |
+| `REPORT_SUMMARY_ONLY` | 设为 `true` 时推送摘要，美股保留基准交易日、币种、支撑压力与条件止损。项目本地仍保存完整报告（默认 false） | 可选 |
 | `REPORT_SHOW_LLM_MODEL` | 通知报告底部是否显示本次分析使用的 LLM 模型名称，默认 `true`；设为 `false` 可隐藏运行时模型信息。该变量仅调整展示，不影响 provider/model/Base URL、LiteLLM 路由或运行时模型保存/迁移/清理语义。 | 可选 |
 | `REPORT_TEMPLATES_DIR` | Jinja2 模板目录（相对项目根，默认 `templates`） | 可选 |
 | `REPORT_RENDERER_ENABLED` | 启用 Jinja2 模板渲染（默认 `false`，保证零回归） | 可选 |
@@ -1261,7 +1261,7 @@ CUSTOM_WEBHOOK_BODY_TEMPLATE={"user_id":123456,"message":$content_json}
 
 ### ntfy / Gotify
 
-ntfy 和 Gotify 都是一等通知渠道，只发送文本 / JSON，不参与 Markdown 转图片。
+ntfy 和 Gotify 都是一等通知渠道，不参与 Markdown 转图片；Gotify 发送文本 / JSON。
 
 ntfy 使用完整 topic endpoint，最后一个 path segment 会作为 topic：
 
@@ -1269,6 +1269,8 @@ ntfy 使用完整 topic endpoint，最后一个 path segment 会作为 topic：
 NTFY_URL=https://ntfy.sh/my-topic
 NTFY_TOKEN=
 ```
+
+ntfy 消息不超过 4,096 个 UTF-8 字节时直接发送正文；超过时（包括大盘复盘）自动将完整内容作为 `.md` 附件上传，并发送简短通知。中文按字节而非字符计数，无需额外配置。附件上传保留 `NTFY_TOKEN`、反向代理路径前缀和 SSL 设置；仍受服务端附件大小、存储配额和过期时间限制，上传被拒绝时会记录推送失败。本地 Markdown 文件不变。
 
 Gotify 使用 server base URL，系统会自动拼接固定 `/message` API，并通过 `X-Gotify-Key` Header 发送 application token。`GOTIFY_URL` 可包含反向代理 path prefix，但不要包含 `/message`：
 
@@ -1987,3 +1989,14 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 - Agent 可通过 `get_portfolio_snapshot` 获取面向账户的紧凑持仓摘要，默认包含精简风险块，适合控制 Token 开销。
 - 可选参数包括 `account_id`、`cost_method`、`as_of`、`include_positions`、`include_risk`。
 - 若风险块生成失败，快照仍会返回；若当前环境未启用持仓模块，工具会返回结构化 `not_supported`。
+
+
+### 美股技术价位
+
+计算只使用最近已完成的常规交易日日线。缺样本时 MA60 标记为不可用。程序将不同数据源或缺失交易日视为历史边界。盘前、常规及盘后报价单独展示。长桥按价成交统计属于辅助证据，当前持有人成本分布标记为不可用。
+
+`US_SWING_CONFIRM_BARS` 默认 3，指定摆动点左右各需几根确认 K 线。
+`US_LEVEL_LOOKBACK_BARS` 默认 60，指定候选摆动点的回看窗口。
+`US_LEVEL_ZONE_ATR` 默认 0.25，指定区间半宽相对 Wilder ATR14 的倍数。
+`US_STOP_BUFFER_ATR` 默认 0.5，指定止损线在支撑区下沿以下的 ATR 倍数。触发条件为常规交易日收盘低于止损线。
+这些参数是工程初值，尚未经过历史表现验证。

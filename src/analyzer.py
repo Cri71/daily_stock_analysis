@@ -1081,19 +1081,27 @@ def stabilize_decision_with_structure(
             price_position = {}
 
         trend_dict = _as_dict_for_decision_guard(trend_result)
-        current_price = _first_numeric_value(
-            getattr(result, "current_price", None),
-            price_position.get("current_price"),
-            trend_dict.get("current_price"),
-        )
-        support = _first_numeric_value(
-            price_position.get("support_level"),
-            _first_list_value(trend_dict.get("support_levels")),
-        )
-        resistance = _first_numeric_value(
-            price_position.get("resistance_level"),
-            _first_list_value(trend_dict.get("resistance_levels")),
-        )
+        levels = dashboard.get("computed_us_levels")
+        if isinstance(levels, dict):
+            current_price = levels.get("close")
+        else:
+            current_price = _first_numeric_value(
+                getattr(result, "current_price", None),
+                price_position.get("current_price"),
+                trend_dict.get("current_price"),
+            )
+        if isinstance(levels, dict):
+            support = (levels.get("support") or {}).get("pivot_price")
+            resistance = (levels.get("resistance") or {}).get("pivot_price")
+        else:
+            support = _first_numeric_value(
+                price_position.get("support_level"),
+                _first_list_value(trend_dict.get("support_levels")),
+            )
+            resistance = _first_numeric_value(
+                price_position.get("resistance_level"),
+                _first_list_value(trend_dict.get("resistance_levels")),
+            )
         decision_type = infer_decision_type_from_advice(
             getattr(result, "decision_type", ""),
             default=getattr(result, "decision_type", "hold") or "hold",
@@ -5130,8 +5138,11 @@ Output the complete Decision Dashboard in JSON format."""
 - 当数据缺失时，请使用中文直接说明“{no_data_text}，无法判断”。
 """
         
+        if "computed_us_levels" in context:
+            prompt += "\n程序计算的美股日线价位与触发条件。仅引用已有值，缺失则说明不可用，单位为 USD。\n"
+            prompt += json.dumps(context["computed_us_levels"], ensure_ascii=False)
         return prompt
-    
+
     def _format_volume(self, volume: Optional[float], report_language: str = "zh") -> str:
         """格式化成交量显示"""
         if volume is None:

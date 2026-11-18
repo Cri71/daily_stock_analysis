@@ -1140,8 +1140,8 @@ CUSTOM_WEBHOOK_BODY_TEMPLATE={"user_id":123456,"message":$content_json}
 
 ### ntfy / Gotify
 
-ntfy and Gotify are first-class notification channels. They send text / JSON
-only and do not use Markdown-to-image.
+ntfy and Gotify are first-class notification channels and do not use
+Markdown-to-image. Gotify sends text / JSON.
 
 ntfy uses the full topic endpoint; the last path segment is treated as the
 topic:
@@ -1150,6 +1150,14 @@ topic:
 NTFY_URL=https://ntfy.sh/my-topic
 NTFY_TOKEN=
 ```
+
+ntfy messages up to 4,096 UTF-8 bytes are sent inline. Longer reports, including
+market reviews, are automatically uploaded as complete `.md` attachments with a
+short notification message; Chinese characters count by bytes, not characters.
+No extra configuration is needed. Uploads preserve `NTFY_TOKEN`, reverse-proxy
+path prefixes, and SSL settings. Server attachment size, storage, and expiry
+limits still apply; a rejected upload is reported as a delivery failure.
+Local Markdown files are unchanged.
 
 Gotify uses the server base URL. The sender appends the fixed `/message` API and
 sends the application token in the `X-Gotify-Key` header. `GOTIFY_URL` may
@@ -1780,3 +1788,16 @@ Technical indicator rules use daily-close edge triggers only. Partial-bar handli
 ---
 
 For more questions, please [submit an Issue](https://github.com/ZhuLinsen/daily_stock_analysis/issues)
+
+
+### US technical levels
+
+Technical analysis uses completed regular-session daily bars, with MA60 unavailable until 60 comparable bars are present. A source change or missing trading session breaks the comparable series. Extended-hours and regular quotes are displayed separately. Longbridge price-level trade statistics serve as supplementary evidence. The current holder cost distribution remains unavailable.
+
+`US_SWING_CONFIRM_BARS` defaults to 3 bars on each side of a swing.
+`US_LEVEL_LOOKBACK_BARS` defaults to 60 bars.
+`US_LEVEL_ZONE_ATR` defaults to a half-width of 0.25 Wilder ATR14.
+`US_STOP_BUFFER_ATR` defaults to 0.5 ATR below the support zone. The condition is a completed regular-session close below that level.
+These starting parameters have not been backtested.
+
+With `REPORT_SUMMARY_ONLY=true`, notifications retain the ticker, currency, reference date, levels and trigger. The local report still contains the full analysis.

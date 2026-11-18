@@ -2476,6 +2476,24 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertEqual(mock_post.call_args.kwargs["json"]["topic"], "dsa-topic")
 
     @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
+    def test_long_market_review_is_sent_as_ntfy_attachment(self, mock_post, mock_get_config):
+        mock_get_config.return_value = _make_config(ntfy_url="https://ntfy.sh/dsa-topic")
+        mock_post.return_value = _make_response(200)
+        service = NotificationService()
+        body = "# 大盘复盘\n\n" + "市场走势📈\n" * 1000
+
+        self.assertTrue(service.send(
+            "[dsa-market-region]: # (cn)\n\n" + body,
+            route_type="report", email_send_to_all=True,
+        ))
+
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args.args[0], "https://ntfy.sh/dsa-topic")
+        self.assertEqual(mock_post.call_args.kwargs["data"], body.strip().encode("utf-8"))
+        self.assertIn("Filename", mock_post.call_args.kwargs["headers"])
+
+    @mock.patch("src.notification.get_config")
     def test_ntfy_url_without_topic_is_not_available(self, mock_get_config: mock.MagicMock):
         mock_get_config.return_value = _make_config(ntfy_url="https://ntfy.sh")
 

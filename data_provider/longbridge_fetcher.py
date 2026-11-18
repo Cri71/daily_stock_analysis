@@ -27,6 +27,7 @@ import logging
 import os
 import time
 import threading
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -740,6 +741,44 @@ class LongbridgeFetcher(BaseFetcher):
     # get_realtime_quote
     # ------------------------------------------------------------------
 
+    def get_trade_profile(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """Read the SDK's provider-defined price distribution for US equities."""
+        if not _is_us_code(stock_code) or not self._get_ctx():
+            return None
+        try:
+            from datetime import timezone
+            from longbridge.openapi import MarketContext
+
+            response = MarketContext(self._config).trade_stats(_to_longbridge_symbol(stock_code))
+            statistics = response.statistics
+            ny = ZoneInfo("America/New_York")
+            def trade_date(value):
+                text = str(value)
+                if text.isdecimal():
+                    return datetime.fromtimestamp(int(text), ny).date().isoformat()
+                return datetime.fromisoformat(text).date().isoformat()
+
+            dates = sorted({trade_date(value) for value in (statistics.trade_date or [])})
+            timestamp = (
+                datetime.fromtimestamp(int(statistics.timestamp), timezone.utc).isoformat()
+                if statistics.timestamp else None
+            )
+            peaks = []
+            for row in response.trades or []:
+                price = safe_float(row.price)
+                amounts = [safe_float(value) for value in (row.buy_amount, row.sell_amount, row.neutral_amount)]
+                if price is not None and price > 0 and all(value is not None and value >= 0 for value in amounts):
+                    peaks.append({"price": price, "activity": sum(amounts)})
+            if peaks:
+                return {
+                    "source": "Longbridge", "currency": "USD", "dates": dates, "timestamp": timestamp,
+                    "unit": "unconfirmed", "trade_session": "unconfirmed",
+                    "peaks": sorted(peaks, key=lambda row: (-row["activity"], row["price"]))[:3],
+                }
+        except Exception as exc:
+            logger.warning("Longbridge trade stats unavailable for %s (%s)", stock_code, type(exc).__name__)
+        return None
+
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """Fetch realtime quote from Longbridge, computing derived fields."""
         if not self.is_available_for_request("realtime_quote"):
@@ -833,8 +872,29 @@ class LongbridgeFetcher(BaseFetcher):
 
         volume_ratio = self._compute_volume_ratio(symbol, volume)
 
+        from datetime import datetime as quote_datetime
+
+        def quote_timestamp(value):
+            # This SDK exposes naive datetimes in the host's local timezone.
+            return value.astimezone().isoformat() if isinstance(value, quote_datetime) else None
+
+        extended_quotes = []
+        for session, attr in (("盘前", "pre_market_quote"), ("盘后", "post_market_quote"), ("夜盘", "overnight_quote")):
+            extended = getattr(q, attr, None)
+            extended_price = safe_float(getattr(extended, "last_done", None))
+            timestamp = quote_timestamp(getattr(extended, "timestamp", None))
+            if timestamp and extended_price is not None and extended_price > 0:
+                extended_quotes.append({
+                    "session": session, "source": "longbridge",
+                    "currency": "USD", "price": extended_price,
+                    "timestamp": timestamp,
+                })
         quote = UnifiedRealtimeQuote(
             code=stock_code,
+            provider_timestamp=quote_timestamp(getattr(q, "timestamp", None)),
+            currency="USD" if _is_us_code(stock_code) else "HKD",
+            session="常规",
+            extended_quotes=extended_quotes or None,
             name=name,
             source=RealtimeSource.LONGBRIDGE,
             price=price,
@@ -901,15 +961,17 @@ class LongbridgeFetcher(BaseFetcher):
         if not candles:
             return pd.DataFrame()
 
+        market_zone = ZoneInfo("America/New_York" if _is_us_code(stock_code) else "Asia/Hong_Kong")
         rows = []
         for c in candles:
             ts = getattr(c, "timestamp", None)
             if ts is None:
                 continue
-            if hasattr(ts, "date"):
-                dt = ts.date()
+            if hasattr(ts, "astimezone"):
+                # Naive SDK datetime values are in the host's local timezone.
+                dt = ts.astimezone(market_zone).date()
             else:
-                dt = datetime.fromtimestamp(int(ts)).date()
+                dt = datetime.fromtimestamp(int(ts), market_zone).date()
 
             rows.append({
                 "date": dt.strftime("%Y-%m-%d"),

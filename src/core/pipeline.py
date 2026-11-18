@@ -11,6 +11,7 @@ A股自选股智能分析系统 - 核心分析流水线
 4. 提供股票分析的核心功能
 """
 
+import json
 import logging
 import inspect
 import threading
@@ -98,12 +99,15 @@ from src.services.decision_signal_extractor import (
 from src.services.stock_list_parser import AnalysisTarget, ParseStatus
 from src.services.decision_signal_summary import summarize_decision_signal
 from src.enums import ReportType
+from src.services.us_technical import completed_bars, lock_us_levels, technical_levels
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.core.trading_calendar import (
     build_market_phase_context,
     get_effective_trading_date,
     get_market_for_stock,
     get_market_now,
+    get_latest_completed_us_session,
+    get_trading_dates,
     is_market_open,
 )
 from data_provider.us_index_mapping import is_us_stock_code
@@ -406,6 +410,25 @@ class StockAnalysisPipeline:
                 code, current_time=current_time, analysis_target=analysis_target
             )
 
+            us_daily = get_market_for_stock(normalize_stock_code(code)) == "us"
+            if us_daily and target_date is None:
+                return False, "US completed trading session unavailable"
+            if us_daily:
+                start_date = target_date - timedelta(days=180)
+                if not force_refresh:
+                    cached = self._load_completed_us_bars(code, target_date)
+                    if len(cached) >= 60 and cached.iloc[-1].date == target_date:
+                        return True, None
+                df, source_name = self.fetcher_manager.get_daily_data(
+                    code, start_date=start_date.isoformat(), end_date=target_date.isoformat(),
+                )
+                df = completed_bars(df, target_date, get_trading_dates("us", start_date, target_date))
+                if df.empty:
+                    return False, "No completed US daily bars"
+                saved = self.db.save_daily_data(df, code, source_name)
+                logger.info("%s completed US bars from %s: %s saved", code, source_name, saved)
+                return True, None
+
             # 断点续传检查：如果最新可复用交易日的数据已存在，则跳过
             if not force_refresh and self.db.has_today_data(code, target_date):
                 logger.info(
@@ -639,13 +662,45 @@ class StockAnalysisPipeline:
 
             # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
+            us_context = None
+            us_levels = None
+            if market == "us":
+                target = self._resolve_resume_target_date(code, current_time=current_time)
+                bars = self._load_completed_us_bars(code, target)
+                if not bars.empty:
+                    bars = self.trend_analyzer._calculate_mas(bars)
+                    for period in (5, 10, 20, 60):
+                        bars[f"ma{period}"] = bars.pop(f"MA{period}")
+                    trend_result = self.trend_analyzer.analyze(bars, code)
+                us_context = self._build_analysis_context_from_daily_df(code, bars) or {
+                    "code": code, "data_missing": True, "today": {}, "yesterday": {},
+                }
+                us_levels = technical_levels(bars, trend_result, target)
+                if trend_result is not None:
+                    support = us_levels["support"]
+                    resistance = us_levels["resistance"]
+                    trend_result.support_levels = [support["pivot_price"]] if support else []
+                    trend_result.resistance_levels = [resistance["pivot_price"]] if resistance else []
+                profile = self.fetcher_manager.get_us_trade_profile(code)
+                if isinstance(profile, dict):
+                    us_levels["trade_profile"] = profile
+                if realtime_quote and getattr(realtime_quote, "price", None):
+                    quote = self._safe_to_dict(realtime_quote) or {}
+                    us_levels["quotes"] = [{
+                        "source": quote.get("source", "unknown"), "price": realtime_quote.price,
+                        "timestamp": quote.get("provider_timestamp"),
+                        "session": quote.get("session", "时段未知"),
+                        "currency": quote.get("currency", "USD"),
+                        "is_stale": quote.get("is_stale"),
+                    }, *quote.get("extended_quotes", [])]
+                us_context["computed_us_levels"] = us_levels
             try:
                 from src.services.history_loader import get_frozen_target_date
                 _mkt = get_market_for_stock(normalize_stock_code(code))
                 frozen = get_frozen_target_date()
                 end_date = frozen if frozen else get_market_now(_mkt).date()
                 start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
-                historical_bars = self.db.get_data_range(code, start_date, end_date)
+                historical_bars = [] if market == "us" else self.db.get_data_range(code, start_date, end_date)
                 if historical_bars:
                     df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
                     # Issue #234: Augment with realtime for intraday MA calculation
@@ -677,6 +732,7 @@ class StockAnalysisPipeline:
                     portfolio_context=portfolio_context,
                     market_structure_context=market_structure_context,
                     analysis_target=analysis_target,
+                    **({"us_context": us_context} if us_context is not None else {}),
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -757,7 +813,7 @@ class StockAnalysisPipeline:
 
             # Step 5: 获取分析上下文（技术面数据）
             self._emit_progress(58, f"{stock_name}：正在整理分析上下文")
-            context = self._get_analysis_context_with_market_fallback(
+            context = us_context if us_context is not None else self._get_analysis_context_with_market_fallback(
                 code, analysis_target=analysis_target
             )
 
@@ -903,6 +959,7 @@ class StockAnalysisPipeline:
             # Step 7.7: price_position fallback
             if result:
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
+                lock_us_levels(result, us_levels)
                 action_source_advice = getattr(result, "operation_advice", None)
                 stabilize_decision_with_structure(result, trend_result, fundamental_context)
                 adjustments = apply_phase_decision_guardrails(
@@ -1095,11 +1152,14 @@ class StockAnalysisPipeline:
                 'signal_score': trend_result.signal_score,
                 'signal_reasons': trend_result.signal_reasons,
                 'risk_factors': trend_result.risk_factors,
+                'ma60': trend_result.ma60,
+                'support_levels': trend_result.support_levels,
+                'resistance_levels': trend_result.resistance_levels,
             }
 
         # Issue #234：盘中分析使用实时 OHLC 与趋势 MA 覆盖 today。
         # 防护条件：trend_result.ma5 > 0 表示 MA 计算已成功且数据量充足。
-        if realtime_quote and trend_result and trend_result.ma5 > 0:
+        if "computed_us_levels" not in enhanced and realtime_quote and trend_result and trend_result.ma5 > 0:
             price = getattr(realtime_quote, 'price', None)
             if price is not None and price > 0:
                 yesterday_close = None
@@ -1444,13 +1504,17 @@ class StockAnalysisPipeline:
             for name, modules in tool_modules.items()
             if INDEX_SKIP_MODULES.intersection(modules)
         }
+        return self._exclude_agent_tools(executor, index_skip_tool_names)
+
+    @staticmethod
+    def _exclude_agent_tools(executor: Any, excluded: set) -> Any:
         registry = getattr(executor, "tool_registry", None)
         if registry is None:
             return executor
         from src.agent.tools.registry import ToolRegistry as _TR
         filtered = _TR(category_timeout_map=registry.category_timeout_map)
         for name in registry.list_names():
-            if name in index_skip_tool_names:
+            if name in excluded:
                 continue
             tool_def = registry.get(name)
             if tool_def is not None:
@@ -1475,6 +1539,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         market_structure_context: Optional[Dict[str, Any]] = None,
         analysis_target: Optional[AnalysisTarget] = None,
+        us_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
@@ -1500,6 +1565,10 @@ class StockAnalysisPipeline:
             # 工具（筹码/基本面/资金流），确保 Agent 分支同样零调用（Story 1.5 V6）。
             if is_index:
                 executor = self._filter_agent_tools_for_index(executor)
+            if us_context is not None:
+                executor = self._exclude_agent_tools(
+                    executor, {"get_daily_history", "analyze_trend", "get_chip_distribution"}
+                )
 
             # Build initial context to avoid redundant tool calls
             initial_context = {
@@ -1562,13 +1631,17 @@ class StockAnalysisPipeline:
                 )
                 logger.info(f"[{code}] Agent mode: local intelligence evidence injected into news_context")
 
-            # Issue #1066: ensure deep history is in DB before agent tools run
-            if analysis_target is None:
-                self._ensure_agent_history(code)
-            else:
-                self._ensure_agent_history(code, analysis_target=analysis_target)
+            if us_context is not None:
+                initial_context["completed_us_daily"] = us_context
 
-            analysis_context = self._load_agent_analysis_context(
+            # Issue #1066: ensure deep history is in DB before agent tools run
+            if us_context is None:
+                if analysis_target is None:
+                    self._ensure_agent_history(code)
+                else:
+                    self._ensure_agent_history(code, analysis_target=analysis_target)
+
+            analysis_context = us_context if us_context is not None else self._load_agent_analysis_context(
                 code, stock_name, analysis_target=analysis_target
             )
             market = "cn" if is_index else get_market_for_stock(normalize_stock_code(code))
@@ -1591,6 +1664,12 @@ class StockAnalysisPipeline:
                 code=code,
                 query_id=query_id,
             )
+            if us_context is not None:
+                analysis_context_pack_summary = (
+                    (analysis_context_pack_summary or "")
+                    + "\n程序计算的美股已完成日线、价位与条件。缺失值保持不可用。\n"
+                    + json.dumps(us_context, ensure_ascii=False)
+                )
             if analysis_context_pack_summary:
                 initial_context["analysis_context_pack_summary"] = analysis_context_pack_summary
 
@@ -1710,6 +1789,7 @@ class StockAnalysisPipeline:
                 )
                 action_chain_valid = pipeline_start_action is not None
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
+                lock_us_levels(result, (us_context or {}).get("computed_us_levels"))
                 realtime_data = initial_context.get("realtime_quote", {})
                 if isinstance(realtime_data, dict):
                     result.current_price = realtime_data.get("price")
@@ -1998,6 +2078,21 @@ class StockAnalysisPipeline:
 
         return self._build_analysis_context_from_daily_df(code, df)
 
+    def _load_completed_us_bars(self, code: str, target_date: Optional[date]) -> pd.DataFrame:
+        if target_date is None:
+            return pd.DataFrame()
+        start_date = target_date - timedelta(days=180)
+        sessions = get_trading_dates("us", start_date, target_date)
+        rows = self.db.get_data_range(code, start_date, target_date)
+        frame = completed_bars(pd.DataFrame([row.to_dict() for row in rows]), target_date, sessions)
+        if not frame.empty:
+            # A source change or a missing session breaks the comparable series.
+            sources = frame["data_source"].fillna("")
+            positions = pd.Series(sessions.get_indexer(pd.to_datetime(frame["date"])))
+            boundaries = sources.ne(sources.shift()) | positions.diff().ne(1)
+            frame = frame.loc[boundaries[boundaries].index[-1]:].reset_index(drop=True)
+        return frame
+
     def _build_analysis_context_from_daily_df(self, code: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if df is None or df.empty:
             return None
@@ -2013,10 +2108,12 @@ class StockAnalysisPipeline:
 
         def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
             normalized: Dict[str, Any] = {"code": row.get("code") or code}
-            for key in ("open", "high", "low", "close", "volume", "amount", "pct_chg", "ma5", "ma10", "ma20", "volume_ratio"):
+            for key in ("open", "high", "low", "close", "volume", "amount", "pct_chg", "ma5", "ma10", "ma20", "ma60", "volume_ratio"):
                 value = row.get(key)
                 if pd.notna(value):
                     normalized[key] = float(value)
+            if row.get("data_source"):
+                normalized["data_source"] = row["data_source"]
             row_date = row.get("date")
             if hasattr(row_date, "date"):
                 row_date = row_date.date()
@@ -3213,7 +3310,7 @@ class StockAnalysisPipeline:
     def _resolve_resume_target_date(
         code: str, current_time: Optional[datetime] = None,
         analysis_target: Optional[AnalysisTarget] = None,
-    ) -> date:
+    ) -> Optional[date]:
         """
         Resolve the trading date used by checkpoint/resume checks.
 
@@ -3225,6 +3322,8 @@ class StockAnalysisPipeline:
             market = "cn"
         else:
             market = get_market_for_stock(normalize_stock_code(code))
+        if market == "us":
+            return get_latest_completed_us_session(current_time)
         return get_effective_trading_date(market, current_time=current_time)
 
     @staticmethod
@@ -3653,12 +3752,17 @@ class StockAnalysisPipeline:
                     report_content = self.notifier.generate_single_stock_report(result)
                     logger.info(f"[{stock_code}] 使用精简报告格式")
 
+                local_report = report_content
+                if isinstance(self.notifier, NotificationService):
+                    local_report = self.notifier.generate_dashboard_report([result], summary_only=False)
+                    if (result.dashboard or {}).get("computed_us_levels"):
+                        report_content = self.notifier.generate_aggregate_report([result], report_type)
                 save_report = getattr(self.notifier, "save_report_to_file", None)
                 if callable(save_report):
                     try:
                         date_str = datetime.now().strftime('%Y%m%d')
                         filename = f"report_{date_str}_{stock_code}.md"
-                        filepath = save_report(report_content, filename=filename)
+                        filepath = save_report(local_report, filename=filename)
                         logger.info(f"[{stock_code}] 单股报告已保存到本地: {filepath}")
                     except Exception as exc:
                         logger.warning(f"[{stock_code}] 单股报告保存失败: {exc}")
@@ -3742,7 +3846,10 @@ class StockAnalysisPipeline:
         self._last_local_report_error = None
         report: Optional[str] = None
         try:
-            report = self._generate_aggregate_report(results, report_type)
+            if isinstance(self.notifier, NotificationService):
+                report = self.notifier.generate_dashboard_report(results, summary_only=False)
+            else:
+                report = self._generate_aggregate_report(results, report_type)
         except Exception as e:
             self._last_local_report_error = str(e)
             logger.error("生成本地报告内容失败: %s", e)

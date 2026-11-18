@@ -1147,6 +1147,69 @@ class TestNtfySender(unittest.TestCase):
         )
 
     @mock.patch("src.notification_sender.ntfy_sender.requests.post")
+    def test_long_markdown_uploads_complete_utf8_attachment(self, mock_post):
+        mock_post.return_value = _response(200)
+        sender = NtfySender(_config(
+            ntfy_url="https://example.com/ntfy/dsa%2Dtopic",
+            ntfy_token="secret-token",
+            webhook_verify_ssl=False,
+        ))
+        body = "# 大盘复盘\n\n" + "中国市场📈 **走势**\n" * 400
+        content = "[dsa-market-region]: # (cn)\n\n" + body
+
+        self.assertTrue(sender.send_to_ntfy(content, title="中文标题 📈", timeout_seconds=5))
+
+        mock_post.assert_called_once()
+        call = mock_post.call_args
+        self.assertEqual(call.args[0], "https://example.com/ntfy/dsa-topic")
+        self.assertEqual(call.kwargs["data"], body.strip().encode("utf-8"))
+        self.assertNotIn("json", call.kwargs)
+        self.assertRegex(call.kwargs["headers"]["Filename"], r"^report_\d{8}_\d{6}\.md$")
+        self.assertEqual(call.kwargs["headers"]["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer secret-token")
+        self.assertEqual(call.kwargs["params"]["title"], "中文标题 📈")
+        self.assertLess(len(call.kwargs["params"]["message"].encode("utf-8")), 4096)
+        self.assertEqual(call.kwargs["timeout"], 5)
+        self.assertFalse(call.kwargs["verify"])
+        prepared = requests.Request(
+            "POST", call.args[0], data=call.kwargs["data"],
+            headers=call.kwargs["headers"], params=call.kwargs["params"],
+        ).prepare()
+        self.assertEqual(prepared.body, body.strip().encode("utf-8"))
+        self.assertNotIn("中文", prepared.url)
+
+    @mock.patch("src.notification_sender.ntfy_sender.requests.post")
+    def test_attachment_threshold_counts_utf8_bytes(self, mock_post):
+        mock_post.return_value = _response(200)
+        sender = NtfySender(_config(ntfy_url="https://ntfy.sh/dsa-topic"))
+        for body, attachment in (
+            ("a" * 4096, False),
+            ("a" * 4097, True),
+            ("中" * 1000, False),
+            ("中" * 1365, True),
+            ("中" * 1365 + "a", True),
+            ("中" * 1365 + "ab", True),
+        ):
+            with self.subTest(bytes=len(body.encode("utf-8"))):
+                self.assertTrue(sender.send_to_ntfy(body))
+                if attachment:
+                    self.assertEqual(mock_post.call_args.kwargs["data"], body.encode("utf-8"))
+                else:
+                    self.assertEqual(mock_post.call_args.kwargs["json"]["message"], body)
+
+    @mock.patch("src.notification_sender.ntfy_sender.requests.post")
+    def test_attachment_upload_failure_returns_false_without_text_retry(self, mock_post):
+        sender = NtfySender(_config(ntfy_url="https://ntfy.sh/dsa-topic"))
+        for failure in (413, 429, 500, requests.exceptions.Timeout(), requests.exceptions.ConnectionError()):
+            with self.subTest(failure=failure):
+                mock_post.reset_mock()
+                mock_post.side_effect = failure if isinstance(failure, Exception) else None
+                mock_post.return_value = _response(failure) if isinstance(failure, int) else None
+                self.assertFalse(sender.send_to_ntfy("中" * 2000))
+                mock_post.assert_called_once()
+                self.assertIn("data", mock_post.call_args.kwargs)
+
+    @mock.patch("src.notification_sender.ntfy_sender.requests.post")
     def test_send_supports_self_hosted_path_prefix(self, mock_post):
         mock_post.return_value = _response(200)
         cfg = _config(ntfy_url="https://example.com/ntfy/dsa-topic")

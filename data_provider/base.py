@@ -2954,6 +2954,12 @@ class DataFetcherManager:
         """Shortcut kept for backward-compat with A-share general loop."""
         return self._supplement_quote(stock_code, primary_quote, "LongbridgeFetcher")
 
+    def get_us_trade_profile(self, stock_code: str):
+        fetcher = self._get_fetcher_by_name("LongbridgeFetcher")
+        if fetcher is not None:
+            return self._call_fetcher_method(fetcher, "get_trade_profile", stock_code)
+        return None
+
     def get_chip_distribution(self, stock_code: str):
         """
         获取筹码分布数据（带熔断和多数据源降级）
