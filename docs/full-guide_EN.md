@@ -1792,6 +1792,8 @@ For more questions, please [submit an Issue](https://github.com/ZhuLinsen/daily_
 
 ### US technical levels
 
+Full reports and notification summaries express zone and conditional stop distances as percentages and ATR multiples from the latest completed regular-session close. Zone distances use the nearest boundary, with explicit labels for closes inside a zone and missing zones. Conditional stops identify the reference close and retain the closing trigger.
+
 Technical analysis uses completed regular-session daily bars, with MA60 unavailable until 60 comparable bars are present. A source change or missing trading session breaks the comparable series. Extended-hours and regular quotes are displayed separately. Longbridge price-level trade statistics serve as supplementary evidence. The current holder cost distribution remains unavailable.
 
 `US_SWING_CONFIRM_BARS` defaults to 3 bars on each side of a swing.

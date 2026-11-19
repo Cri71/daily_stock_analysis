@@ -23,6 +23,7 @@
 {% for e in enriched %}
 {% set result = e.result %}
 {% set dashboard = result.dashboard if result.dashboard else {} %}
+{% set us_levels_appended = computed_us_levels_appended and dashboard.get('computed_us_levels') %}
 {% set intel = dashboard.get('intelligence') or {} %}
 {% set core = dashboard.get('core_conclusion') or {} %}
 {% set battle = dashboard.get('battle_plan') or {} %}
@@ -98,8 +99,10 @@
 | {{ labels.ma10_label }} | {{ price_data.get('ma10', 'N/A') }} |
 | {{ labels.ma20_label }} | {{ price_data.get('ma20', 'N/A') }} |
 | {{ labels.bias_ma5_label }} | {{ price_data.get('bias_ma5', 'N/A') }}% {{ price_data.get('bias_status', 'N/A') }} |
+{% if not us_levels_appended %}
 | {{ labels.support_level_label }} | {{ price_data.get('support_level', 'N/A') }} |
 | {{ labels.resistance_level_label }} | {{ price_data.get('resistance_level', 'N/A') }} |
+{% endif %}
 {% endif %}
 
 {% set vol_data = data_persp.get('volume_analysis', {}) %}
@@ -193,11 +196,11 @@
 
 {% endif %}
 
-{% if battle %}
+{% if battle and (not us_levels_appended or battle.get('position_strategy') or battle.get('action_checklist')) %}
 ### 🎯 {{ labels.battle_plan_heading }}
 
 {% set sniper = battle.get('sniper_points', {}) %}
-{% if sniper %}
+{% if sniper and not us_levels_appended %}
 **📍 {{ labels.action_points_heading }}**
 
 | {{ labels.action_points_heading }} | {{ labels.current_price_label }} |

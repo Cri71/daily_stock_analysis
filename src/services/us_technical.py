@@ -148,14 +148,33 @@ def format_us_levels(results, *, full):
         if not levels:
             continue
         basis = levels["basis_date"] or "不可用"
+        close = levels.get("close")
+        atr = levels.get("atr14")
+
+        def distance(delta):
+            percent = f"{delta / close:.2%}"
+            atr_multiple = f"{delta / atr:.2f} ATR" if atr and atr > 0 else "ATR 倍数不可用"
+            return f"距基准收盘 {percent} / {atr_multiple}"
+
         def zone(key):
             bounds = levels[key]
-            if bounds:
-                return f'{bounds["low"]:.2f}–{bounds["high"]:.2f}'
-            return "不可用"
+            if bounds is None:
+                return "暂无已确认区间"
+            low, high = bounds["low"], bounds["high"]
+            text = f"{low:.2f}–{high:.2f}"
+            if not close or close <= 0:
+                return f"{text}（距基准收盘不可用）"
+            if low <= close <= high:
+                return f"{text}（区间内，{distance(0)}）"
+            return f"{text}（{distance(min(abs(close - low), abs(close - high)))}）"
+
         stop = levels["stop_loss"]
-        trigger = f'{stop:.2f}，{levels["trigger"]}' if stop is not None else "不可用"
-        lines.append(f'**{result.code} · USD · 基准 {basis}**')
+        trigger = "不可用"
+        if stop is not None:
+            stop_distance = distance(abs(close - stop)) if close and close > 0 else "距基准收盘不可用"
+            trigger = f'{stop:.2f}（{stop_distance}），{levels["trigger"]}'
+        reference = f" · 收盘 {close:.2f}" if close and close > 0 else ""
+        lines.append(f'**{result.code} · USD · 基准 {basis}{reference}**')
         lines.append(f'支撑 {zone("support")}｜压力 {zone("resistance")}｜条件止损 {trigger}')
         if not full:
             continue

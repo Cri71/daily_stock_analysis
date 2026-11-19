@@ -1312,6 +1312,7 @@ class NotificationService(
                 extra_context={
                     **self._get_history_compare_context(results),
                     "report_language": report_language,
+                    "computed_us_levels_appended": True,
                 },
             )
             if out:
@@ -1364,6 +1365,7 @@ class NotificationService(
             for result in sorted_results:
                 signal_text, signal_emoji, signal_tag = self._get_signal_level(result)
                 dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
+                has_computed_us_levels = bool(dashboard.get("computed_us_levels"))
 
                 # 股票名称（优先使用 dashboard 或 result 中的名称，转义 *ST 等特殊字符）
                 stock_name = self._get_display_name(result, report_language)
@@ -1469,10 +1471,13 @@ class NotificationService(
                             f"| {labels['ma10_label']} | {price_data.get('ma10', 'N/A')} |",
                             f"| {labels['ma20_label']} | {price_data.get('ma20', 'N/A')} |",
                             f"| {labels['bias_ma5_label']} | {price_data.get('bias_ma5', 'N/A')}% {bias_status} |",
-                            f"| {labels['support_level_label']} | {price_data.get('support_level', 'N/A')} |",
-                            f"| {labels['resistance_level_label']} | {price_data.get('resistance_level', 'N/A')} |",
-                            "",
                         ])
+                        if not has_computed_us_levels:
+                            report_lines.extend([
+                                f"| {labels['support_level_label']} | {price_data.get('support_level', 'N/A')} |",
+                                f"| {labels['resistance_level_label']} | {price_data.get('resistance_level', 'N/A')} |",
+                            ])
+                        report_lines.append("")
                     # 量能分析
                     if vol_data:
                         report_lines.extend([
@@ -1507,14 +1512,14 @@ class NotificationService(
 
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}
-                if battle:
+                if battle and (not has_computed_us_levels or battle.get("position_strategy") or battle.get("action_checklist")):
                     report_lines.extend([
                         f"### 🎯 {labels['battle_plan_heading']}",
                         "",
                     ])
                     # 狙击点位
                     sniper = battle.get('sniper_points', {})
-                    if sniper:
+                    if sniper and not has_computed_us_levels:
                         report_lines.extend([
                             f"**📍 {labels['action_points_heading']}**",
                             "",

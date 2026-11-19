@@ -5,9 +5,11 @@ import unittest
 from contextlib import ExitStack, closing
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import requests
 
 from data_provider.realtime_types import RealtimeSource, UnifiedRealtimeQuote
 from src.analyzer import GeminiAnalyzer
@@ -15,7 +17,7 @@ from src.config import Config
 from src.core.pipeline import StockAnalysisPipeline
 from src.core.trading_calendar import get_latest_completed_us_session, get_trading_dates
 from src.enums import ReportType
-from src.services.us_technical import technical_levels
+from src.services.us_technical import format_us_levels, technical_levels
 from src.stock_analyzer import StockTrendAnalyzer
 from src.storage import DatabaseManager
 
@@ -70,11 +72,25 @@ class USCompletedLevelsTests(unittest.TestCase):
         self.assertIsNone(levels["stop_loss"])
         self.assertIsNone(technical_levels(pd.DataFrame(), None, BASIS)["atr14"])
 
+    def test_zone_distance_marks_inside_and_missing(self):
+        levels = {
+            "basis_date": BASIS.isoformat(), "close": 100.0, "atr14": 10.0,
+            "support": {"low": 90.0, "high": 100.0}, "resistance": None,
+            "stop_loss": 85.0, "trigger": "常规交易时段日线收盘低于止损线",
+        }
+        result = SimpleNamespace(code="LITE", dashboard={"computed_us_levels": levels})
+        report = format_us_levels([result], full=False)
+        self.assertIn("区间内，距基准收盘 0.00% / 0.00 ATR", report)
+        self.assertIn("压力 暂无已确认区间", report)
+        self.assertIn("85.00（距基准收盘 15.00% / 1.50 ATR）", report)
+        levels["resistance"] = {"low": 150.0, "high": 155.0}
+        self.assertIn("150.00–155.00（距基准收盘 50.00% / 5.00 ATR）", format_us_levels([result], full=False))
+
     def test_normal_pipeline_refills_cache_and_locks_report_and_database(self):
         frame = daily_fixture()
         clipped = frame.tail(42)
         quote = UnifiedRealtimeQuote(
-            code="LITE", source=RealtimeSource.LONGBRIDGE, price=559.97,
+            code="LITE", source=RealtimeSource.LONGBRIDGE, price=596.95,
             provider_timestamp="2026-11-17T21:00:00+00:00", session="常规", currency="USD",
         )
         fetcher = MagicMock()
@@ -146,8 +162,28 @@ class USCompletedLevelsTests(unittest.TestCase):
                 self.assertEqual(stop, levels["stop_loss"])
                 self.assertEqual(json.loads(raw)["dashboard"]["computed_us_levels"], levels)
                 post.assert_called_once()
-                summary = post.call_args.kwargs["json"]["message"]
+                payload = post.call_args.kwargs["json"]
+                summary = payload["message"]
                 full = local.read_text(encoding="utf-8")
+                wire = requests.Request("POST", post.call_args.args[0], json=payload).prepare().body
+                self.assertLessEqual(len(summary.encode("utf-8")), 4096)
+                self.assertLessEqual(len(wire), 8192)
+                shared = summary[summary.index("**LITE · USD"):].strip()
+                self.assertIn(shared, full)
+                self.assertIn("收盘 559.97", shared)
+                close, atr = levels["close"], levels["atr14"]
+                for delta in (
+                    close - levels["support"]["high"],
+                    levels["resistance"]["low"] - close,
+                    close - levels["stop_loss"],
+                ):
+                    self.assertIn(f"距基准收盘 {delta / close:.2%} / {delta / atr:.2f} ATR", shared)
+                with patch.object(config, "report_renderer_enabled", True):
+                    template_full = pipeline.notifier.generate_dashboard_report(results, summary_only=False)
+                for body in (full, template_full):
+                    self.assertIn(shared, body)
+                    self.assertNotIn("| 支撑位 |", body)
+                    self.assertNotIn("| 🛑 止损位 |", body)
                 for report in (summary, full):
                     self.assertIn("LITE · USD · 基准 2026-11-17", report)
                     self.assertIn("常规交易时段日线收盘低于止损线", report)
